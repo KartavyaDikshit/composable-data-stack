@@ -16,7 +16,7 @@ from .validator import has_errors, validate_profile
 from .planner import build_plan
 from .renderer import render_compose
 from .image_updates import collect_module_images, check_image_update
-
+from .security import run_security_validation
 
 def print_diagnostics(diagnostics) -> None:
     for d in diagnostics:
@@ -160,6 +160,14 @@ def main() -> int:
     list_subparsers.add_parser("modules", help="List available module sources")
     list_subparsers.add_parser("images", help="List images from module templates and check for newer versions")
 
+    security_parser = subparsers.add_parser("security", help="Run security validation on a profile")
+    security_parser.add_argument(
+        "profile",
+        nargs="?",
+        help="Profile path or identifier. Uses CDS_PROFILE_PATH if set.",
+        **profile_arg_kwargs,
+    )
+
     if argcomplete is not None:
         argcomplete.autocomplete(parser)
 
@@ -300,8 +308,50 @@ def main() -> int:
                     )
             return 0
 
-    return 0
+    if args.command == "security":
+        try:
+            profile_path = resolve_profile_path(args.profile)
+        except ValueError as exc:
+            print(f"ERROR {exc}")
+            return 1
 
+        diagnostics = validate_profile(profile_path)
+        if has_errors(diagnostics):
+            print_diagnostics(diagnostics)
+            print("Cannot run security validation because profile validation failed.")
+            return 1
+
+        repo_root = Path(__file__).resolve().parents[1]
+        rule_schema_path = repo_root / "security" / "rule-schema.json"
+        rule_set_path = repo_root / "security" / "rule-set.json"
+
+        try:
+            findings = run_security_validation(
+                profile_path=Path(profile_path),
+                rule_schema_path=rule_schema_path,
+                rule_set_path=rule_set_path,
+            )
+        except Exception as e:
+            print(str(e), file=sys.stderr)
+            return 2
+
+        if not findings:
+            print("No security findings.")
+            return 0
+
+        for f in findings:
+            print(f"[{f['severity'].upper()}] {f['rule_id']} {f['path']}")
+            print(f"  {f['message']}")
+            if f["value"] is not None:
+                print(f"  value: {f['value']}")
+            for rec in f["recommendation"]:
+                print(f"  fix: {rec}")
+            print()
+
+        return 1 if any(f["severity"] == "high" for f in findings) else 0
+
+    print("Base validation not shown here.")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
